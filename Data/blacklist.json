@@ -1,0 +1,8 @@
+{
+  "185.220.101.45": {
+    "reason": "185.220.101.45 attempted logins against 8 distinct devices in 10 minutes. Classic horizontal password spray pattern.",
+    "attack_type": "Password Spray",
+    "flagged_at": "2026-03-08 16:08:38",
+    "firewall_command": "netsh advfirewall firewall add rule name=\"FLARE-BLOCK-185.220.101.45\" dir=in action=block remoteip=185.220.101.45"
+  }
+}
