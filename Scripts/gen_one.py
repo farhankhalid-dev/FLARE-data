@@ -88,13 +88,56 @@ def stage7():
              "Source":"10.7.0.1","DestIP":f"192.168.1.{i}"}
             for i in range(70, 73)]
 
+# ── Stage RDP: off-hours RDP login
+def stage_rdp():
+    return [{"Type":"System","Timestamp": datetime.now().replace(hour=3, minute=15).strftime("%Y-%m-%d %H:%M:%S"),
+             "EventID":4624,"User":"Hacker_RDP","LogonType":"10","Process":"N/A",
+             "Source":"10.9.0.1","DestIP":"192.168.1.90"}]
+
+# ── Stage Exfiltration: large transfer to external IP on non-standard port
+def stage_exfil():
+    return [{"Type":"Network","Timestamp":ts(),"EventID":None,
+             "User":"N/A","LogonType":"0","Process":"N/A",
+             "Source":"192.168.1.50","DestIP":"203.0.113.5",
+             "DestPort":2222,"FlowBytes":9999999}]
+
+# ── Stage DDoS: 60 connections from same source to same dest port
+def stage_ddos():
+    return [{"Type":"Network","Timestamp":ts(),"EventID":None,
+             "User":"N/A","LogonType":"0","Process":"N/A",
+             "Source":"10.8.0.1","DestIP":"192.168.1.100",
+             "DestPort":80,"FlowBytes":500000}
+            for _ in range(60)]
+
+# ── Stage Port Scan: 12 distinct ports from same source — use non-C2 ports
+def stage_portscan():
+    return [{"Type":"Network","Timestamp":ts(),"EventID":None,
+             "User":"N/A","LogonType":"0","Process":"N/A",
+             "Source":"10.6.0.1","DestIP":"192.168.1.10",
+             "DestPort":p,"FlowBytes":64}
+            for p in [21,22,23,25,53,110,139,143,389,636,3306,5432]]
+
+
 if __name__ == "__main__":
     Path(INCOMING_FILE).parent.mkdir(parents=True, exist_ok=True)
     Path(INCOMING_FILE).write_text("[]")
 
-    logs = (stage1() + stage2() + stage3() +
-            stage4() + stage5() + stage6() + stage7())
+    logs = (stage1() + stage2() + stage3() + stage4() +
+            stage5() + stage6() + stage7() +
+            stage_rdp() + stage_ddos() + stage_exfil() + stage_portscan())
 
     write(logs)
-    print(f"Written {len(logs)} logs to {INCOMING_FILE}")
-    print("Expected: 1 alert per stage (7 total)")
+    print(f"\nWritten {len(logs)} logs to {INCOMING_FILE}")
+    print("\nExpected alerts when agent.py reads this:")
+    print("  Stage 1 — Reconnaissance    : Username Enumeration")
+    print("  Stage 1 — Reconnaissance    : RDP Anomaly (off hours)")
+    print("  Stage 1 — Reconnaissance    : Port Scan")
+    print("  Stage 2 — Weaponization     : Payload Staging Tool")
+    print("  Stage 3 — Delivery          : Suspicious Process Execution")
+    print("  Stage 4 — Exploitation      : Brute Force")
+    print("  Stage 5 — Installation      : New Account Created")
+    print("  Stage 6 — C2               : C2 Port Connection")
+    print("  Stage 7 — Actions           : Lateral Movement")
+    print("  Stage 7 — Actions           : DDoS Attack")
+    print("  Stage 7 — Actions           : Data Exfiltration")
+    print("\nNow run: python agent.py")

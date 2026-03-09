@@ -157,7 +157,8 @@ def ingest_log(log: dict, mem: FlareMemory):
         src  = log.get("Source",  "N/A")
         dst  = log.get("DestIP",  "N/A")
         port = log.get("DestPort", 0)
-        mem.record_network(t, src, dst, port)
+        flow = float(log.get("FlowBytes", 0) or 0)
+        mem.record_network(t, src, dst, port, flow)
 
 
 # ------------------------------------------------------------------ #

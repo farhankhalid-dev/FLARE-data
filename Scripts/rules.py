@@ -471,21 +471,236 @@ def check_actions_on_objectives(logs, mem: FlareMemory):
 
 
 # ------------------------------------------------------------------ #
+#  NEW THRESHOLDS                                                      #
+# ------------------------------------------------------------------ #
+
+RDP_OFF_HOURS_START     = 22   # 10 PM
+RDP_OFF_HOURS_END       = 6    # 6 AM
+DDOS_CONNECTION_THRESHOLD = 50  # connections to same dest in 5 min
+DDOS_BYTES_THRESHOLD    = 100000 # total bytes to same dest in 5 min
+EXFIL_BYTES_THRESHOLD   = 1000000 # 1MB to external IP = suspicious
+PORT_SCAN_THRESHOLD     = 10   # distinct ports in 5 min
+
+
+# ------------------------------------------------------------------ #
+#  RDP ANOMALY — LogonType 10 during off hours                        #
+# ------------------------------------------------------------------ #
+
+def check_rdp_anomaly(logs, mem: FlareMemory):
+    alerts = []
+
+    for log in logs:
+        if log.get("Type") != "System" or log.get("EventID") != 4624:
+            continue
+        if str(log.get("LogonType", "0")) != "10":
+            continue
+
+        # Check if off hours
+        try:
+            hour = datetime.strptime(
+                log.get("Timestamp", ""), "%Y-%m-%d %H:%M:%S"
+            ).hour
+        except Exception:
+            hour = datetime.now().hour
+
+        is_off_hours = hour >= RDP_OFF_HOURS_START or hour < RDP_OFF_HOURS_END
+        confidence   = "HIGH" if is_off_hours else "MEDIUM"
+        user         = log.get("User", "unknown")
+        source       = log.get("Source", "N/A")
+        dest         = log.get("DestIP", "N/A")
+
+        alert_key = f"rdp_{user}_{source}"
+        if mem.should_fire_alert(alert_key, cooldown_minutes=30):
+            alerts.append(make_alert(
+                stage             = "Stage 1 — Reconnaissance",
+                attack_type       = "RDP Anomaly" + (" — Off Hours" if is_off_hours else ""),
+                confidence        = confidence,
+                description       = (
+                    f"RDP login (LogonType 10) by '{user}' from {source} to {dest} "
+                    f"at {hour:02d}:00. "
+                    + ("Login occurred outside business hours — high suspicion."
+                       if is_off_hours else "Login during business hours — verify if expected.")
+                ),
+                source_ip         = source,
+                username          = user,
+                dest_ip           = dest,
+                recommended_action= (
+                    f"Verify if '{user}' should have RDP access from {source}.\n"
+                    f"If unexpected, terminate session and investigate:\n"
+                    f"  query session /server:{dest}\n"
+                    f"  logoff <session_id> /server:{dest}"
+                )
+            ))
+
+    return alerts
+
+
+# ------------------------------------------------------------------ #
+#  DDOS — High volume connections to same dest IP + port              #
+# ------------------------------------------------------------------ #
+
+def check_ddos(logs, mem: FlareMemory):
+    alerts = []
+
+    # Collect unique dest IP+port pairs from network logs in this batch
+    targets = set(
+        (log.get("DestIP"), log.get("DestPort"))
+        for log in logs
+        if log.get("Type") == "Network"
+        and log.get("DestIP")
+        and log.get("DestPort")
+    )
+
+    for dest_ip, dest_port in targets:
+        count, total_bytes = mem.get_high_volume_dest(
+            dest_ip, dest_port, within_minutes=5
+        )
+
+        # Collect unique source IPs hitting this dest
+        source_ips = set(
+            log.get("Source") for log in logs
+            if log.get("Type") == "Network"
+            and log.get("DestIP") == dest_ip
+            and log.get("DestPort") == dest_port
+        )
+        source_str = list(source_ips)[0] if len(source_ips) == 1 else "multi"
+
+        if count >= DDOS_CONNECTION_THRESHOLD:
+            alert_key = f"ddos_{dest_ip}_{dest_port}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=5):
+                alerts.append(make_alert(
+                    stage             = "Stage 7 — Actions on Objectives",
+                    attack_type       = "DDoS Attack",
+                    confidence        = "HIGH",
+                    description       = (
+                        f"{count} connections and {int(total_bytes):,} bytes sent to "
+                        f"{dest_ip}:{dest_port} in 5 minutes. "
+                        f"Volumetric flood pattern detected."
+                    ),
+                    dest_ip           = dest_ip,
+                    dest_port         = dest_port,
+                    recommended_action= (
+                        f"Rate-limit or block traffic to {dest_ip}:{dest_port}.\n"
+                        f"  netsh advfirewall firewall add rule name=\"FLARE-DDOS-{dest_ip}\" "
+                        f"dir=in action=block remoteip={dest_ip}"
+                    )
+                ))
+
+    return alerts
+
+
+# ------------------------------------------------------------------ #
+#  DATA EXFILTRATION — Large outbound transfer to external IP         #
+# ------------------------------------------------------------------ #
+
+def check_exfiltration(logs, mem: FlareMemory):
+    alerts = []
+
+    # Check logs directly for large single transfers
+    for log in logs:
+        if log.get("Type") != "Network":
+            continue
+
+        flow_bytes = float(log.get("FlowBytes", 0) or 0)
+        dest_ip    = log.get("DestIP", "")
+        dest_port  = log.get("DestPort", 0)
+        source     = log.get("Source", "N/A")
+
+        # Skip internal IPs
+        if any(dest_ip.startswith(p) for p in ["192.168.", "10.", "172.16.", "127."]):
+            continue
+
+        if flow_bytes >= EXFIL_BYTES_THRESHOLD:
+            alert_key = f"exfil_{source}_{dest_ip}_{dest_port}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=10):
+                alerts.append(make_alert(
+                    stage             = "Stage 7 — Actions on Objectives",
+                    attack_type       = "Data Exfiltration",
+                    confidence        = "HIGH",
+                    description       = (
+                        f"{int(flow_bytes):,} bytes sent from {source} to "
+                        f"external IP {dest_ip}:{dest_port}. "
+                        f"Unusually large outbound transfer — possible data theft."
+                    ),
+                    source_ip         = source,
+                    dest_ip           = dest_ip,
+                    dest_port         = dest_port,
+                    recommended_action= (
+                        f"Investigate process responsible for transfer from {source}.\n"
+                        f"Block outbound to {dest_ip} immediately:\n"
+                        f"  netsh advfirewall firewall add rule name=\"FLARE-EXFIL-{dest_ip}\" "
+                        f"dir=out action=block remoteip={dest_ip}"
+                    )
+                ))
+                mem.add_to_blacklist(dest_ip,
+                    f"Exfiltration destination — {int(flow_bytes):,} bytes",
+                    "Data Exfiltration")
+
+    return alerts
+
+
+# ------------------------------------------------------------------ #
+#  PORT SCANNING — Same source hitting many distinct ports rapidly    #
+# ------------------------------------------------------------------ #
+
+def check_port_scan(logs, mem: FlareMemory):
+    alerts = []
+
+    source_ips = set(
+        log.get("Source")
+        for log in logs
+        if log.get("Type") == "Network"
+        and log.get("Source")
+    )
+
+    for ip in source_ips:
+        port_count = mem.get_port_scan_ports(ip, within_minutes=5)
+
+        if port_count >= PORT_SCAN_THRESHOLD:
+            alert_key = f"portscan_{ip}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=10):
+                alerts.append(make_alert(
+                    stage             = "Stage 1 — Reconnaissance",
+                    attack_type       = "Port Scan",
+                    confidence        = "HIGH",
+                    description       = (
+                        f"{ip} probed {port_count} distinct ports in 5 minutes. "
+                        f"Classic network reconnaissance — attacker mapping open services."
+                    ),
+                    source_ip         = ip,
+                    recommended_action= (
+                        f"Block {ip} immediately — active scanning in progress.\n"
+                        f"  netsh advfirewall firewall add rule name=\"FLARE-BLOCK-{ip}\" "
+                        f"dir=in action=block remoteip={ip}"
+                    )
+                ))
+                mem.add_to_blacklist(ip,
+                    f"Port scan — {port_count} ports probed",
+                    "Port Scan")
+
+    return alerts
+
+
+# ------------------------------------------------------------------ #
 #  MAIN ENTRY POINT — called by agent.py                              #
 # ------------------------------------------------------------------ #
 
 def run_all_rules(logs, mem: FlareMemory):
     """
-    Run all 7 kill chain rules against the current log batch.
+    Run all rules against the current log batch.
     Returns a flat list of alert dicts.
     """
     all_alerts = []
     all_alerts += check_reconnaissance(logs, mem)
+    all_alerts += check_rdp_anomaly(logs, mem)
     all_alerts += check_weaponization(logs, mem)
     all_alerts += check_delivery(logs, mem)
     all_alerts += check_exploitation(logs, mem)
     all_alerts += check_installation(logs, mem)
     all_alerts += check_c2(logs, mem)
+    all_alerts += check_ddos(logs, mem)
+    all_alerts += check_exfiltration(logs, mem)
+    all_alerts += check_port_scan(logs, mem)
     all_alerts += check_actions_on_objectives(logs, mem)
     return all_alerts
 

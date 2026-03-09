@@ -72,7 +72,8 @@ class FlareMemory:
                 timestamp TEXT NOT NULL,
                 source_ip TEXT,
                 dest_ip   TEXT,
-                dest_port INTEGER
+                dest_port INTEGER,
+                flow_bytes REAL DEFAULT 0
             )
         """)
 
@@ -142,11 +143,11 @@ class FlareMemory:
         """, (timestamp, username, process_name, host))
         self.conn.commit()
 
-    def record_network(self, timestamp, source_ip, dest_ip, dest_port):
+    def record_network(self, timestamp, source_ip, dest_ip, dest_port, flow_bytes=0):
         self.conn.execute("""
-            INSERT INTO network_events (timestamp, source_ip, dest_ip, dest_port)
-            VALUES (?, ?, ?, ?)
-        """, (timestamp, source_ip, dest_ip, dest_port))
+            INSERT INTO network_events (timestamp, source_ip, dest_ip, dest_port, flow_bytes)
+            VALUES (?, ?, ?, ?, ?)
+        """, (timestamp, source_ip, dest_ip, dest_port, flow_bytes))
         self.conn.commit()
 
     def record_privilege_event(self, timestamp, username, host):
@@ -253,6 +254,46 @@ class FlareMemory:
             SELECT COUNT(*) as count FROM privilege_events
             WHERE username = ? AND timestamp >= ?
         """, (username, cutoff)).fetchone()
+        return row["count"]
+
+    def get_rdp_logons(self, within_minutes=10):
+        """Return recent RemoteInteractive logons (LogonType 10) — RDP."""
+        cutoff = (datetime.now() - timedelta(minutes=within_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = self.conn.execute("""
+            SELECT * FROM successful_logons
+            WHERE logon_type = '10' AND timestamp >= ?
+        """, (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_high_volume_dest(self, dest_ip, dest_port, within_minutes=5):
+        """Count connections + total bytes to same dest — DDoS signal."""
+        cutoff = (datetime.now() - timedelta(minutes=within_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        row = self.conn.execute("""
+            SELECT COUNT(*) as count, SUM(flow_bytes) as total_bytes
+            FROM network_events
+            WHERE dest_ip = ? AND dest_port = ? AND timestamp >= ?
+        """, (dest_ip, dest_port, cutoff)).fetchone()
+        return row["count"], row["total_bytes"] or 0
+
+    def get_large_outbound_transfers(self, within_minutes=10, min_bytes=1000000):
+        """Connections with large FlowBytes to external IPs — exfiltration signal."""
+        cutoff = (datetime.now() - timedelta(minutes=within_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = self.conn.execute("""
+            SELECT * FROM network_events
+            WHERE timestamp >= ? AND flow_bytes >= ?
+            AND dest_ip NOT LIKE '192.168.%'
+            AND dest_ip NOT LIKE '10.%'
+            AND dest_ip NOT LIKE '172.16.%'
+        """, (cutoff, min_bytes)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_port_scan_ports(self, source_ip, within_minutes=5):
+        """How many distinct ports has this source hit recently?"""
+        cutoff = (datetime.now() - timedelta(minutes=within_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        row = self.conn.execute("""
+            SELECT COUNT(DISTINCT dest_port) as count FROM network_events
+            WHERE source_ip = ? AND timestamp >= ?
+        """, (source_ip, cutoff)).fetchone()
         return row["count"]
 
     def get_suspicious_processes(self, within_minutes=10):

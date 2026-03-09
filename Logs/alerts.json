@@ -479,5 +479,31 @@
     "dest_ip": null,
     "dest_port": null,
     "recommended_action": "Investigate active sessions for 'user_s7'. Consider disabling account pending review:\n  net user user_s7 /active:no"
+  },
+  {
+    "timestamp": "2026-03-09 11:02:40",
+    "stage": "Stage 6 \u2014 Command & Control",
+    "attack_type": "Beaconing Detected",
+    "confidence": "MEDIUM",
+    "description": "Host contacted 92.38.180.154:443 21 times in 10 minutes. Regular interval connections suggest malware beaconing.",
+    "source_ip": null,
+    "username": null,
+    "process": null,
+    "dest_ip": "92.38.180.154",
+    "dest_port": 443,
+    "recommended_action": "Investigate process making connections to 92.38.180.154. Consider blocking outbound:\n  netsh advfirewall firewall add rule name=\"FLARE-BLOCK-92.38.180.154\" dir=out action=block remoteip=92.38.180.154"
+  },
+  {
+    "timestamp": "2026-03-09 11:07:11",
+    "stage": "Stage 6 \u2014 Command & Control",
+    "attack_type": "Beaconing Detected",
+    "confidence": "MEDIUM",
+    "description": "Host contacted 4.213.25.240:443 6 times in 10 minutes. Regular interval connections suggest malware beaconing.",
+    "source_ip": null,
+    "username": null,
+    "process": null,
+    "dest_ip": "4.213.25.240",
+    "dest_port": 443,
+    "recommended_action": "Investigate process making connections to 4.213.25.240. Consider blocking outbound:\n  netsh advfirewall firewall add rule name=\"FLARE-BLOCK-4.213.25.240\" dir=out action=block remoteip=4.213.25.240"
   }
 ]
