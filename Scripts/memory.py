@@ -164,6 +164,15 @@ class FlareMemory:
         """, (timestamp, username, host))
         self.conn.commit()
 
+    def record_account_enabled(self, timestamp, username, host):
+        """4722 — disabled account was re-enabled."""
+        # Reuse account_creation table with a marker so get_new_accounts can find it
+        self.conn.execute("""
+            INSERT INTO account_creation (timestamp, username, host)
+            VALUES (?, ?, ?)
+        """, (timestamp, f"[RE-ENABLED]{username}", host))
+        self.conn.commit()
+
     def add_to_blacklist(self, ip, reason, attack_type):
         self.conn.execute("""
             INSERT OR REPLACE INTO blacklist (ip, reason, flagged_at, attack_type)

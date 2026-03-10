@@ -23,6 +23,7 @@ from pathlib import Path
 
 from memory  import FlareMemory
 from rules   import run_all_rules
+from ioc     import run_ioc_checks
 from actions import fire_all, print_banner, print_status
 
 # ------------------------------------------------------------------ #
@@ -153,6 +154,15 @@ def ingest_log(log: dict, mem: FlareMemory):
             # New account created
             mem.record_account_creation(t, user, dst)
 
+        elif eid == 4722:
+            # Disabled account re-enabled
+            mem.record_account_enabled(t, user, dst)
+
+        elif eid in (4723, 4724, 4732, 4698):
+            # Password reset / group add / scheduled task
+            # Rules read these directly from the log batch — no special memory needed
+            pass
+
     elif log.get("Type") == "Network":
         src  = log.get("Source",  "N/A")
         dst  = log.get("DestIP",  "N/A")
@@ -207,7 +217,8 @@ def run_agent():
                 save_processed_ids(processed_ids)
 
                 # 4. Run all rules against the new batch
-                alerts = run_all_rules(new_logs, mem)
+                alerts  = run_all_rules(new_logs, mem)
+                alerts += run_ioc_checks(new_logs)
 
                 # 5. Fire alerts
                 if alerts:

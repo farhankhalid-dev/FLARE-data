@@ -288,10 +288,13 @@ def check_installation(logs, mem: FlareMemory):
         if log.get("Type") != "System":
             continue
 
-        # New account creation
-        if log.get("EventID") == 4720:
-            user    = log.get("User", "unknown")
-            alert_key = f"new_account_{user}_{log.get('Timestamp','')}"
+        event_id = log.get("EventID")
+        user     = log.get("User", "unknown")
+        ts       = log.get("Timestamp", "")
+
+        # ── 4720: New account created ──────────────────────────────────
+        if event_id == 4720:
+            alert_key = f"new_account_{user}_{ts}"
             if mem.should_fire_alert(alert_key, cooldown_minutes=60):
                 alerts.append(make_alert(
                     stage             = "Stage 5 — Installation",
@@ -309,18 +312,16 @@ def check_installation(logs, mem: FlareMemory):
                     )
                 ))
 
-        # Privilege grant immediately after new account — high suspicion
-        if log.get("EventID") == 4672:
-            user = log.get("User", "unknown")
-            new_accounts = mem.get_new_accounts(within_minutes=30)
+        # ── 4672: Privilege grant on a newly created account ───────────
+        if event_id == 4672:
+            new_accounts  = mem.get_new_accounts(within_minutes=30)
             new_usernames = [a["username"] for a in new_accounts]
-
             if user in new_usernames:
                 alert_key = f"new_account_priv_{user}"
                 if mem.should_fire_alert(alert_key, cooldown_minutes=30):
                     alerts.append(make_alert(
                         stage             = "Stage 5 — Installation",
-                        attack_type       = "New Account Given Privileges",
+                        attack_type       = "Backdoor Account — New Account Given Privileges",
                         confidence        = "HIGH",
                         description       = (
                             f"Newly created account '{user}' was immediately "
@@ -333,6 +334,111 @@ def check_installation(logs, mem: FlareMemory):
                             f"  net user {user} /active:no"
                         )
                     ))
+
+        # ── 4732: Account added to privileged group ────────────────────
+        if event_id == 4732:
+            group = log.get("Process", "unknown group")  # Group name in Process field
+            alert_key = f"group_add_{user}_{group}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=30):
+                # Escalate to HIGH if the account was recently created
+                new_accounts  = mem.get_new_accounts(within_minutes=60)
+                new_usernames = [a["username"] for a in new_accounts]
+                confidence    = "HIGH" if user in new_usernames else "MEDIUM"
+                alerts.append(make_alert(
+                    stage             = "Stage 5 — Installation",
+                    attack_type       = "Backdoor Account — Added to Privileged Group",
+                    confidence        = confidence,
+                    description       = (
+                        f"Account '{user}' was added to a privileged group '{group}'. "
+                        + ("Account was recently created — likely backdoor setup."
+                           if user in new_usernames
+                           else "Verify this change was authorised.")
+                    ),
+                    username          = user,
+                    recommended_action= (
+                        f"Review group membership for '{user}':\n"
+                        f"  net user {user}\n"
+                        f"Remove from group if unauthorised:\n"
+                        f"  net localgroup {group} {user} /delete"
+                    )
+                ))
+
+        # ── 4722: Account re-enabled ───────────────────────────────────
+        if event_id == 4722:
+            alert_key = f"account_enabled_{user}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=60):
+                alerts.append(make_alert(
+                    stage             = "Stage 5 — Installation",
+                    attack_type       = "Backdoor Account — Disabled Account Re-enabled",
+                    confidence        = "HIGH",
+                    description       = (
+                        f"Previously disabled account '{user}' was re-enabled. "
+                        f"Attackers often re-enable dormant accounts to avoid "
+                        f"detection from new account creation alerts."
+                    ),
+                    username          = user,
+                    recommended_action= (
+                        f"Verify if '{user}' should be active. "
+                        f"If unexpected, disable again immediately:\n"
+                        f"  net user {user} /active:no"
+                    )
+                ))
+
+        # ── 4723/4724: Password reset ──────────────────────────────────
+        if event_id in (4723, 4724):
+            alert_key = f"password_reset_{user}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=30):
+                # HIGH if the account was recently created or just enabled
+                new_accounts  = mem.get_new_accounts(within_minutes=60)
+                new_usernames = [a["username"] for a in new_accounts]
+                confidence    = "HIGH" if user in new_usernames else "MEDIUM"
+                event_label   = "forced reset (4724)" if event_id == 4724 else "self-reset (4723)"
+                alerts.append(make_alert(
+                    stage             = "Stage 5 — Installation",
+                    attack_type       = "Backdoor Account — Password Reset",
+                    confidence        = confidence,
+                    description       = (
+                        f"Password {event_label} on account '{user}'. "
+                        + ("Account was recently created — possible backdoor credential setup."
+                           if user in new_usernames
+                           else "Verify this reset was authorised.")
+                    ),
+                    username          = user,
+                    recommended_action= (
+                        f"Confirm '{user}' initiated this reset. "
+                        f"If unexpected, disable account:\n"
+                        f"  net user {user} /active:no"
+                    )
+                ))
+
+        # ── 4698: Scheduled task created ──────────────────────────────
+        if event_id == 4698:
+            alert_key = f"sched_task_{user}_{ts}"
+            if mem.should_fire_alert(alert_key, cooldown_minutes=30):
+                # HIGH if preceded by failed logons or new account
+                prior_failures = mem.get_failed_logons_by_user(user, within_minutes=30)
+                new_accounts   = mem.get_new_accounts(within_minutes=60)
+                new_usernames  = [a["username"] for a in new_accounts]
+                suspicious     = prior_failures > 0 or user in new_usernames
+                confidence     = "HIGH" if suspicious else "MEDIUM"
+                alerts.append(make_alert(
+                    stage             = "Stage 5 — Installation",
+                    attack_type       = "Persistence — Scheduled Task Created",
+                    confidence        = confidence,
+                    description       = (
+                        f"Scheduled task created by '{user}'. "
+                        + ("Preceded by failed logons or new account — likely attacker persistence."
+                           if suspicious
+                           else "Verify this task was created intentionally.")
+                    ),
+                    username          = user,
+                    recommended_action= (
+                        f"Review scheduled tasks:\n"
+                        f"  schtasks /query /fo LIST /v | findstr /i \"{user}\"\n"
+                        f"Delete if unauthorised:\n"
+                        f"  schtasks /delete /tn <taskname> /f"
+                    )
+                ))
 
     return alerts
 
